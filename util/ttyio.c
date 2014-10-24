@@ -71,6 +71,7 @@ static struct {
 
 #else /* yeah, we have a real OS */
 static FILE *ttyfp = NULL;
+static FILE *ttyfpin = NULL;
 #endif
 
 static int initialized;
@@ -157,7 +158,7 @@ init_ttyfp(void)
 	return;
 
 #if defined(_WIN32)
-    {
+    if( isatty(fileno(stdin)) ) {
 	SECURITY_ATTRIBUTES sa;
 
 	memset(&sa, 0, sizeof(sa));
@@ -176,6 +177,9 @@ init_ttyfp(void)
 			       &sa, OPEN_EXISTING, 0, 0 );
 	if (con.in == INVALID_HANDLE_VALUE)
             log_fatal ("open(CONIN$) failed: %s", w32_strerror (0));
+    } else {
+      con.out = GetStdHandle(STD_OUTPUT_HANDLE);
+      con.in = GetStdHandle(STD_INPUT_HANDLE);
     }
     SetConsoleMode(con.in, DEF_INPMODE );
     SetConsoleMode(con.out, DEF_OUTMODE );
@@ -183,7 +187,8 @@ init_ttyfp(void)
 #elif defined(__EMX__)
     ttyfp = stdout; /* Fixme: replace by the real functions: see wklib */
 #else
-    ttyfp = batchmode? stderr : fopen( tty_get_ttyname (), "r+");
+    ttyfp = batchmode? stderr : stdout;
+    ttyfpin = batchmode? stderr : stdin;
     if( !ttyfp ) {
         ttyfp = stderr;  /* Use stderr as fallback for log_error.  */
         initialized = 1; /* Make sure log_error won't try to init
@@ -271,7 +276,7 @@ tty_printf( const char *fmt, ... )
           log_bug("xtryvasprintf() failed\n");
         n = strlen (buf);
 
-	if (!WriteConsoleA (con.out, buf, n, &nwritten, NULL))
+	if (!WriteFile( con.out, buf, n, &nwritten, NULL ) )
 	    log_fatal ("WriteConsole failed: %s", w32_strerror (0));
 	if( n != nwritten )
 	    log_fatal ("WriteConsole failed: %d != %d\n", n, (int)nwritten );
@@ -449,7 +454,7 @@ do_get( const char *prompt, int hidden )
     for(;;) {
 	DWORD nread;
 
-	if (!ReadConsoleA (con.in, cbuf, 1, &nread, NULL))
+	if( !ReadFile( con.in, cbuf, 1, &nread, NULL ) )
 	    log_fatal ("ReadConsole failed: %s", w32_strerror (0));
 	if( !nread )
 	    continue;
@@ -518,16 +523,18 @@ do_get( const char *prompt, int hidden )
     } while (c != '\n');
     i = (i>0) ? i-1 : 0;
 #else /* unix version */
+    if( !isatty(fileno(stdin)) ) hidden = 0;
+
     if( hidden ) {
 #ifdef HAVE_TCGETATTR
 	struct termios term;
 
-	if( tcgetattr(fileno(ttyfp), &termsave) )
+	if( tcgetattr(fileno(ttyfpin), &termsave) )
 	    log_fatal("tcgetattr() failed: %s\n", strerror(errno) );
 	restore_termios = 1;
 	term = termsave;
 	term.c_lflag &= ~(ECHO | ECHOE | ECHOK | ECHONL);
-	if( tcsetattr( fileno(ttyfp), TCSAFLUSH, &term ) )
+	if( tcsetattr( fileno(ttyfpin), TCSAFLUSH, &term ) )
 	    log_fatal("tcsetattr() failed: %s\n", strerror(errno) );
 #endif
 # ifdef __VMS
@@ -541,7 +548,7 @@ do_get( const char *prompt, int hidden )
 
     /* fixme: How can we avoid that the \n is echoed w/o disabling
      * canonical mode - w/o this kill_prompt can't work */
-    while( read(fileno(ttyfp), cbuf, 1) == 1 && *cbuf != '\n' ) {
+    while( read(fileno(ttyfpin), cbuf, 1) == 1 && *cbuf != '\n' ) {
 	if( !hidden )
 	    last_prompt_len++;
 	c = *cbuf;
@@ -568,7 +575,7 @@ do_get( const char *prompt, int hidden )
 
     if( hidden ) {
 # ifdef HAVE_TCGETATTR
-	if( tcsetattr(fileno(ttyfp), TCSAFLUSH, &termsave) )
+	if( tcsetattr(fileno(ttyfpin), TCSAFLUSH, &termsave) )
 	    log_error("tcsetattr() failed: %s\n", strerror(errno) );
 	restore_termios = 0;
 # endif
@@ -644,7 +651,8 @@ tty_kill_prompt()
     if( !last_prompt_len )
 	return;
 #ifdef _WIN32
-    tty_printf("\r%*s\r", last_prompt_len, "");
+    if( isatty(fileno(stdin)) )
+      tty_printf("\r%*s\r", last_prompt_len, "");
 #else
     {
 	int i;
